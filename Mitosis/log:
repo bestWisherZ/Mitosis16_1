@@ -1,0 +1,329 @@
+import re
+import os
+
+# 提取生成跨片交易的日志
+def extract_sendtx_logs(log_file, from_shard, to_shard_start, to_shard_end):
+    # 确保 to_shard_end >= to_shard_start
+    if to_shard_end < to_shard_start:
+        raise ValueError("to_shard_end must be greater than or equal to to_shard_start")
+
+    # 打开日志文件进行读取
+    with open(log_file, 'r') as file:
+        lines = file.readlines()
+
+    # 保存提取的哈希值
+    hash_values = {}
+
+    # 遍历 to_shard 的范围
+    for to_shard in range(to_shard_start, to_shard_end + 1):
+        # 创建输出文件名
+        output_file = f"log_{from_shard}_to_{to_shard}.txt"
+
+        # 定义日志行的正则表达式模式
+        pattern = re.compile(
+            rf"generate cross-shard tx, \[Node-\d+-\d+\] fromShard {from_shard} to {to_shard} tx has been generated, tx.hash is (\w+)"
+        )
+        
+        # 过滤出符合模式的日志行
+        extracted_logs = [line.strip() for line in lines if pattern.search(line)]
+        
+        # 提取哈希值并存储
+        hash_values[to_shard] = [pattern.search(log).group(1) for log in extracted_logs if pattern.search(log)]
+
+        # 将提取的日志行写入到指定的输出文件
+        with open(output_file, 'w') as file:
+            for log in extracted_logs:
+                file.write(log + '\n')
+
+    print(f"Logs extracted and saved to files for to_shard range {to_shard_start} to {to_shard_end}.")
+    return hash_values
+
+# 交易被打包进区块中
+def append_packed_tx_logs(log_file, from_shard, to_shard_start, to_shard_end, tx_hashes):
+    # 确保 to_shard_end >= to_shard_start
+    if to_shard_end < to_shard_start:
+        raise ValueError("to_shard_end must be greater than or equal to to_shard_start")
+
+    # 打开日志文件进行读取
+    with open(log_file, 'r') as file:
+        lines = file.readlines()
+
+    # 保存 block.hash 的字典
+    block_hashes = {}
+
+    # 遍历 from_shard 和 to_shard 的范围
+    for to_shard in range(to_shard_start, to_shard_end + 1):
+        # 定义输出文件名
+        output_file = f"log_{from_shard}_to_{to_shard}.txt"
+        
+        # 定义日志行的正则表达式模式
+        pattern = re.compile(
+            rf"\[Node-\d+-\d+\] fromShard {from_shard} to {to_shard} tx has been packed into block by leader, tx.hash is (\w+), block.hash is (\w+)"
+        )
+        
+        # 过滤出符合模式且哈希值匹配的日志行
+        extracted_logs = []
+        for line in lines:
+            match = pattern.search(line)
+            if match and match.group(1) in tx_hashes.get(to_shard, []):
+                extracted_logs.append(line.strip())
+                block_hash = match.group(2)  # 提取 block.hash
+        
+        # 将提取的日志行追加到指定的输出文件
+        with open(output_file, 'a') as file:
+            for log in extracted_logs:
+                file.write(log + '\n')
+
+    print(f"Packed transaction logs appended to files for from_shard {from_shard} and to_shard range {to_shard_start} to {to_shard_end}.")
+    return block_hash
+
+def start_bft_consensus_logs(log_file, from_shard, to_shard_start, to_shard_end, block_hash):
+    # 打开日志文件进行读取
+    with open(log_file, 'r') as file:
+        lines = file.readlines()
+
+    for to_shard in range(to_shard_start, to_shard_end + 1):
+        # 定义输出文件名
+        output_file = f"log_{from_shard}_to_{to_shard}.txt"
+
+        # 定义 BFT 共识日志信息的正则表达式模式
+        start_bft_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] start bft consensus with new block-{from_shard}-\d+-{block_hash}\." process=consensus'
+        )
+        leader_prepare_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] \(leader\) prepare new block-{from_shard}-\d+-{block_hash}" process=consensus'
+        )
+        # gossip_pattern = re.compile(
+        #     rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] gossip bft msg <block-{from_shard}-\d+-{block_hash}, type-\d+>, size: \d+\." process=consensus'
+        # )
+        validator_prepare_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] \(validator\) prepare vote block-{from_shard}-\d+-{block_hash}" process=consensus'
+        )
+        shard_prepared_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Shard-{from_shard}\] block-{from_shard}-\d+-{block_hash} prepared: \d+/\d+" process=consensus'
+        )
+        leader_precommit_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] \(leader\) precommit new block-{from_shard}-\d+-{block_hash}" process=consensus'
+        )
+
+        validator_precommit_vote_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] \(validator\) precommit vote block-{from_shard}-\d+-{block_hash}" process=consensus'
+        )
+        shard_precommitted_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Shard-{from_shard}\] block-{from_shard}-\d+-{block_hash} precommitted: \d+/\d+" process=consensus'
+        )
+        leader_commit_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] \(leader\) commit new block-{from_shard}-\d+-{block_hash}" process=consensus'
+        )
+        validator_commit_vote_pattern = re.compile(
+            rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{from_shard}-\d+\] \(validator\) commit vote block-{from_shard}-\d+-{block_hash}" process=consensus'
+        )
+
+        # 保存提取的原始日志行
+        extracted_logs = []
+
+        # 过滤出符合任一模式的日志行
+        for line in lines:
+            if (start_bft_pattern.search(line) or 
+                leader_prepare_pattern.search(line) or
+                validator_prepare_pattern.search(line) or
+                shard_prepared_pattern.search(line) or
+                leader_precommit_pattern.search(line) or
+                validator_precommit_vote_pattern.search(line) or
+                shard_precommitted_pattern.search(line) or
+                leader_commit_pattern.search(line) or
+                validator_commit_vote_pattern.search(line)):
+                extracted_logs.append(line.strip())
+        
+        # 将提取的信息写入到指定的输出文件
+        with open(output_file, 'a') as file:
+            for info in extracted_logs:
+                file.write(info + '\n')
+
+
+    print(f"BFT consensus logs extracted and saved to {output_file} for shard {from_shard} and block hash {block_hash}.")
+
+def start_bft_consensus_logs2(log_file, from_shard, to_shard, block_hash):
+    # 打开日志文件进行读取
+    with open(log_file, 'r') as file:
+        lines = file.readlines()
+
+    # 定义输出文件名
+    output_file = f"log_{from_shard}_to_{to_shard}.txt"
+
+    # 定义 BFT 共识日志信息的正则表达式模式
+    start_bft_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] start bft consensus with new block-{to_shard}-\d+-{block_hash}\." process=consensus'
+    )
+    leader_prepare_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] \(leader\) prepare new block-{to_shard}-\d+-{block_hash}" process=consensus'
+    )
+    # gossip_pattern = re.compile(
+    #     rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] gossip bft msg <block-{to_shard}-\d+-{block_hash}, type-\d+>, size: \d+\." process=consensus'
+    # )
+    validator_prepare_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] \(validator\) prepare vote block-{to_shard}-\d+-{block_hash}" process=consensus'
+    )
+    shard_prepared_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Shard-{to_shard}\] block-{to_shard}-\d+-{block_hash} prepared: \d+/\d+" process=consensus'
+    )
+    leader_precommit_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] \(leader\) precommit new block-{to_shard}-\d+-{block_hash}" process=consensus'
+    )
+
+    validator_precommit_vote_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] \(validator\) precommit vote block-{to_shard}-\d+-{block_hash}" process=consensus'
+    )
+    shard_precommitted_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Shard-{to_shard}\] block-{to_shard}-\d+-{block_hash} precommitted: \d+/\d+" process=consensus'
+    )
+    leader_commit_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] \(leader\) commit new block-{to_shard}-\d+-{block_hash}" process=consensus'
+    )
+    validator_commit_vote_pattern = re.compile(
+        rf'time="(?P<timestamp>[^"]+)" level=info msg="\[Node-{to_shard}-\d+\] \(validator\) commit vote block-{to_shard}-\d+-{block_hash}" process=consensus'
+    )
+
+    # 保存提取的原始日志行
+    extracted_logs = []
+
+    # 过滤出符合任一模式的日志行
+    for line in lines:
+        if (start_bft_pattern.search(line) or 
+            leader_prepare_pattern.search(line) or
+            validator_prepare_pattern.search(line) or
+            shard_prepared_pattern.search(line) or
+            leader_precommit_pattern.search(line) or
+            validator_precommit_vote_pattern.search(line) or
+            shard_precommitted_pattern.search(line) or
+            leader_commit_pattern.search(line) or
+            validator_commit_vote_pattern.search(line)):
+            extracted_logs.append(line.strip())
+    
+    # 将提取的信息写入到指定的输出文件
+    with open(output_file, 'a') as file:
+        for info in extracted_logs:
+            file.write(info + '\n')
+
+
+# # 提取交易共识过程中的相关信息
+# def extract tx_consensus(log_file, from_shard, to_shard_start,tx_hash):
+
+#     print("tx_consensus has extracted")
+
+
+# 提取节点接收交易日志
+def append_received_tx_logs(log_file, from_shard, to_shard_start, to_shard_end, tx_hashes):
+    # 确保 to_shard_end >= to_shard_start
+    if to_shard_end < to_shard_start:
+        raise ValueError("to_shard_end must be greater than or equal to to_shard_start")
+
+    # 打开日志文件进行读取
+    with open(log_file, 'r') as file:
+        lines = file.readlines()
+
+    # 遍历 from_shard 和 to_shard 的范围
+    for to_shard in range(to_shard_start, to_shard_end + 1):
+        # 定义输出文件名
+        output_file = f"log_{from_shard}_to_{to_shard}.txt"
+        
+        # 定义日志行的正则表达式模式
+        pattern = re.compile(
+            rf"received txs,\[Node-\d+-\d+\] fromShard {from_shard} to {to_shard} tx has been received, tx.hash is (\w+), block.hash is \w+"
+        )
+        
+        # 过滤出符合模式且哈希值匹配的日志行
+        extracted_log = []
+        for line in lines:
+            match = pattern.search(line)
+            if match and match.group(1) in tx_hashes.get(to_shard, []):
+                extracted_log.append(line.strip())
+                break  
+
+        # 将提取的日志行追加到指定的输出文件
+        with open(output_file, 'a') as file:
+            for log in extracted_log:
+                file.write(log + '\n')
+
+    print(f"Received transaction logs appended to files for from_shard {from_shard} and to_shard range {to_shard_start} to {to_shard_end}.")
+
+def tx_packed_to_block(log_file, from_shard, to_shard_start, to_shard_end, tx_hashes):
+    # 确保 to_shard_end >= to_shard_start
+    if to_shard_end < to_shard_start:
+        raise ValueError("to_shard_end must be greater than or equal to to_shard_start")
+
+    # 打开日志文件进行读取
+    with open(log_file, 'r') as file:
+        lines = file.readlines()
+
+    for to_shard in range(to_shard_start, to_shard_end + 1):
+        # 定义输出文件名
+        output_file = f"log_{from_shard}_to_{to_shard}.txt"
+        # 从 tx_hashes 中获取目标 to_shard 的交易哈希
+        tx_hash_list = tx_hashes.get(to_shard, [])
+        # 获取交易哈希值
+        if tx_hash_list:
+            tx_hash = tx_hash_list[0]
+        # else:
+        #     print(f"No transaction hash found for shard {to_shard}.")
+
+        if tx_hash is None:
+            # print(f"No transaction hash found for shard {to_shard} in tx_hashes")
+            continue
+        # 定义正则表达式模式
+        pattern = re.compile(
+            rf'time="[^"]+" level=info msg="\[Node-{to_shard}-\d+\] Transaction Hash: {tx_hash},Block Hash: (?P<block_hash>[0-9a-fA-F]+)" process=consensus'
+        )
+        
+        extracted_log = []
+        # 遍历日志行并应用正则表达式模式
+        for line in lines:
+            match = pattern.search(line)
+            if match:
+                # 提取并保存日志行
+                extracted_log.append(line.strip())
+                # 提取并打印区块哈希值
+                block_hash = match.group('block_hash')
+                # print(f"Block Hash for tx_hash {tx_hash}: {match.group('block_hash')}")
+
+        # 将提取的日志行追加到指定的输出文件
+        with open(output_file, 'a') as file:
+            for log in extracted_log:
+                file.write(log + '\n')
+                
+        # print(log_file,from_shard,to_shard,block_hash)
+        # 得到目的分片的共识信息
+        start_bft_consensus_logs2(log_file, from_shard, to_shard, block_hash)
+    print("to_shard Logs extracted and saved.")
+
+def main():
+    # 设置shard_id
+    from_shard = 1002
+    to_shard_start1 = 1001
+    to_shard_end1 = 1004
+
+    # to_shard_start2 = 1021
+    # to_shard_end2 = 1040
+    
+    # 提取跨片交易生成日志并获取交易哈希值
+    tx_hashes = extract_sendtx_logs("log.txt", from_shard, to_shard_start1, to_shard_end1)
+
+    # 交易被leader打包进区块中
+    block_hash = append_packed_tx_logs("log.txt", from_shard, to_shard_start1, to_shard_end1, tx_hashes)
+
+    # 提取共识过程
+    start_bft_consensus_logs("log.txt", from_shard, to_shard_start1, to_shard_end1, block_hash)
+
+    # 接收方收到交易
+    append_received_tx_logs("log.txt", from_shard, to_shard_start1, to_shard_end1, tx_hashes)
+
+    # 目的分片
+    tx_packed_to_block("log.txt", from_shard, to_shard_start1, to_shard_end1, tx_hashes)
+
+    # tx_hashes = extract_sendtx_logs("log1.txt", from_shard, to_shard_start2, to_shard_end2)
+    # block_hash = append_packed_tx_logs("log1.txt", from_shard, to_shard_start2, to_shard_end2, tx_hashes)
+    # append_received_tx_logs("log2.txt", from_shard, to_shard_start2, to_shard_end2, tx_hashes)
+
+
+if __name__ == "__main__":
+    main()
